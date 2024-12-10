@@ -1,1 +1,2 @@
 # Association-of-Variables-with-Total-Drug-Use
+Drug use remains a pressing issue for public health, with extensive effects on individuals, families, and society. The main objective of this report is to apply sophisticated statistical techniques we learned in this course to discern the factors that correlate with drug use among young individuals. This research is pivotal because it aims to discover the factors that may lead to drug use, thereby laying the groundwork for generating effective interventions to mitigate drug use.
