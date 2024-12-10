@@ -1,0 +1,390 @@
+---
+title: "Association of Variables with Total Drug Use"
+author: "Linyan Teng"
+date: "2024-04-13"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+ 
+Our primary task is to use proper statistical methods to identify variables that appear to be associated with TOTALDRUGS. 
+
+1. Analyze the Data 
+
+```{r}
+# Load necessary libraries
+library(readr) 
+library(glmnet) 
+library(vip)
+library(randomForest) 
+library(corrplot) 
+library(tidyverse)
+library(car)
+library(leaps)
+library(ggplot2)
+library(RColorBrewer)
+library(gbm)
+library(psych)
+# Read the data
+data <- read_csv("data_math678.csv")
+head(data)
+# we only consider TOTALDRUGS rather than ILLEGALDRUGS1 and ILLEGALDRUGS2
+data <- data[, !(names(data) %in% c("ILLEGALTOTALILLEGALDRUGS1", "ILLEGTOTALILLEGALDRUGS2"))]
+# Summary of the data
+summary(data)
+
+# List of names of variables to analyze
+require(rms)
+describe(data)
+# Describe the data frame
+describe(data)
+```
+Check numeric variables
+
+```{r}
+# Print numeric variables
+variable_types <- sapply(data[], class)
+numeric_vars <- names(variable_types[variable_types == "numeric"])
+numeric_vars <- numeric_vars[!grepl("\\.\\.\\.1",numeric_vars)]
+print(numeric_vars)
+# Print summary for numeric variables
+
+summary(data[, numeric_vars])
+
+# Visualize numeric variables
+for (var in numeric_vars) {
+  cat("\nVariable:", var, "\n")
+  # Calculate color gradient based on density
+  color_gradient <- colorRampPalette(c("lightblue"))(100)
+  # Create histogram
+  hist(data[[var]], main = var, xlab = var, ylab = "Frequency", col = color_gradient)
+  # Add legend for summary statistics
+  legend("topright", legend = paste("Min:", min(data[[var]]), " Median:", median(data[[var]]), " Max:", max(data[[var]]), " SD:", round(sd(data[[var]]), 2)), 
+         fill = "white", border = "darkblue", bg = "transparent", box.lwd = 0)
+}
+# check correlations among numeric variables
+correlation_matrix <- cor(data[c("TOTALDRUGS", "AGE", "LONELINESS", "DEPRESSION", "ANXIETY")])
+write.table(correlation_matrix, "correlation_matrix.csv", sep = ",", quote = FALSE)
+print(correlation_matrix )
+library(viridis)
+library(gplots)
+heatmap(correlation_matrix,Rowv = NA,Colv = NA,col = viridis(30))
+
+```
+
+Check Categorical Variables
+
+```{r}
+
+# Get categorical variables
+categorical_column_names <- names(data)[sapply(data, function(x) is.factor(x) || is.character(x))]
+# Convert categorical variables to factors
+data[categorical_column_names] <- lapply(data[categorical_column_names], as.factor)
+# Print the names of factor variables
+factor_vars <- names(data)[sapply(data, is.factor)]
+print(factor_vars)
+for (var in factor_vars) {
+  cat("\nVariable:", var, "\n")
+  print(summary(data[[var]]))
+}
+# Visualize factor variables
+for (var in factor_vars) {
+  cat("\nVariable:", var, "\n")
+  # Create a bar plot
+  barplot(table(data[[var]]), main = var, ylab = "Frequency", col = "darkgray")
+}
+
+
+```
+
+We found that "AGE","LONELINESS","TOTALDRUGS", "DEPRESSION" and "ANXIETY" are numeric variables, others are categorical variables. And from visualization, we can see that there are NAs in the data, so we need to further process the data.
+
+2. Data Cleaning and Processing
+
+```{r}
+
+# Check for missing values
+missing_values <- colSums(is.na(data))
+print(missing_values)
+# Impute missing values with mean for numeric columns
+numeric_columns <- sapply(data, is.numeric)
+data[ , numeric_columns] <- lapply(data[ , numeric_columns], function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  return(x)
+})
+# Confirm there is no missing value
+missing_values_new <- colSums(is.na(data))
+print(missing_values_new)
+
+# Identify and remove outliers from the data
+outliers <- boxplot.stats(data$TOTALDRUGS)$out
+print(outliers)
+data<- data[!data$TOTALDRUGS %in% outliers, ]
+summary(data)
+
+```
+
+
+For data cleaning process, we found "LONELINESS" has 48 missing values. Therefore we replace it with its mean value.
+Then, we filter the data by removing the outliers.
+
+
+3. Ridge Regression
+
+3.1 Check assumptions
+
+Before fitting the linear regression, it’s essential to check some assumptions. Common assumptions include linearity, homoscedasticity (constant variance of errors), and absence of multicollinearity.
+
+```{r}
+# Check linearity: use residual plots
+linear_model <- lm(TOTALDRUGS ~ AGE + LONELINESS + DEPRESSION + ANXIETY, data = data)
+plot(linear_model, 1)
+library(car)
+avPlots(linear_model)
+
+# Check Residual Errors have Constant Variance（homoscedasticity）: use residual plots
+plot(linear_model, 3)
+
+# Check for multicollinearity: use Variance Inflation Factors (VIF)
+vif_values <- car::vif(linear_model)
+print(vif_values)
+
+```
+
+The plot(linear_model, 1) command generates Residual Plot. Ideally, we want to see a random scatter of points with no discernible pattern in residual plot.
+As the polt shows, we could detect a perfect linear relationship.
+
+The plot(linear_model, 3) command generates a Scale-Location plot. In this plot we can see the fitted values vs the square root of the standardized residuals. Ideally, we would want to see the residual points equally spread around the red line, which would indicate constant variance. If the spread of the residuals remains roughly constant as the fitted values increase, it suggests that homoscedasticity is reasonable. 
+
+
+Variance Inflation Factor (VIF) is a measure used to quantify the severity of multicollinearity in a regression model. It assesses how much the variance of an estimated regression coefficient is inflated due to multicollinearity.The vif() function calculates VIF values for each predictor variable in the model. If the VIF value for a predictor variable is greater than 10, it indicates a high degree of multicollinearity associated with that variable. 
+As the results shown, they are not greater than 10, which means it does not indicate a high degree of multicollinearity.
+
+
+3.2 Fit the Ridge Regression Model
+
+Ridge Regression adds a penalty equivalent to the square of the magnitude of coefficients.Penalty term: λ * ||β||² It tends to shrink the coefficients towards zero, but they rarely reach exactly zero.Ridge regression generally reduces the variance of the model more effectively than Lasso, but at the cost of introducing some bias. 
+We prefer ridge rather than lasso is that there are only four continuous variables:“AGE”,“LONELINESS”, “DEPRESSION” and “ANXIETY”. We assume that all four predictors are potentially useful and want to mitigate multicollinearity issues.
+
+```{r}
+# Prepare the predictor matrix and response vector
+X <- as.matrix(data[, c("AGE", "LONELINESS", "DEPRESSION", "ANXIETY")])
+y <- data$TOTALDRUGS
+
+# Perform cross-validation to tune lambda
+cvfit <- cv.glmnet(x = X, y = y, alpha = 0)
+plot(cvfit)
+
+# Select the optimal lambda
+optimal_lambda <- cvfit$lambda.min
+print(optimal_lambda)
+
+# Refit the Ridge regression model with the optimal lambda
+ridge_model <- glmnet(X, y, alpha = 0, lambda = optimal_lambda)
+
+# Print the summary of the Ridge regression model
+print(ridge_model)
+summary(ridge_model)
+
+
+```
+We fit a Ridge regression model using the glmnet() function from the "glmnet" package, setting alpha = 0 for Ridge regression.
+
+3.2 Check the significance
+```{r}
+# Check coefficients
+coefficients <- coef(ridge_model)
+print(coefficients)
+
+# Assess variable importance using the vip package
+variable_importance_ridge <- vip(ridge_model)
+
+# Print variable importance
+print(variable_importance_ridge)
+vi(ridge_model)
+
+```
+
+From ridge regression, We found out that "ANXIETY" appears to be the most influential variable in the model, positively affecting the target variable. "LONELINESS" and "DEPRESSION" also have some importance, but their effects are in the opposite direction. "AGE" seems to have the least impact on the target variable among the variables listed.
+
+
+4. Decision Tree Model
+
+Decision trees make decisions at each node based on the values of predictor variables. For categorical predictors, decision trees can directly use the categories of the variable as splitting criteria. The algorithm evaluates different categories of the predictor to determine the best split, allowing it to efficiently capture the predictive patterns associated with each category.
+
+4.1 Fit the decision tree model
+
+```{r}
+# Load required libraries
+library(vip)
+library(rpart)
+# Prepare the predictor matrix and response vector
+X <- data[, c("AGE", "LONELINESS", "DEPRESSION", "ANXIETY", "GENDER", "RACE", "US_BORN", 
+              "EMPLOYED", "SCHOOL", "THERAPY", "ALCOHOL", "TOBACCO", "ECSTASY", "KETAMINE",
+              "METHAMPHETAMINE", "MARIJUANA", "COCAINE_POWEDER", "GHB", "COCAINE_CRACK", 
+              "HEROIN", "MUSHROOM", "LSD", "RX")]
+y <- data$TOTALDRUGS
+
+# Fit a decision tree model
+tree_model <- rpart(TOTALDRUGS ~ ., data = data)
+summary(tree_model)
+
+```
+
+4.2 Check the significance
+```{r}
+# Assess variable importance using the vip package
+variable_importance_tree <- vip(tree_model)
+
+# Print variable importance for decision tree
+print(variable_importance_tree)
+vi(tree_model)
+```
+
+The vip() function computes variable importance scores based on the VIP (Variable Importance in Projection) method, which assesses the contribution of each variable to the model's predictive performance. Higher VIP scores indicate greater importance of the variable in predicting the response.
+
+We can see that the most three significant variables are "ANXIETY", "MARIJUANA" and "ALCOHOL". "ANXIETY" has the highest importance score (545.7489), indicating that it is likely one of the most influential variables in the model.
+
+
+5. Random Forest Model
+
+In Random Forest, at each node of a decision tree, the algorithm considers a random subset of predictor variables (features) to determine the best split. This random feature selection process helps in effectively handling both categorical and continuous predictors without any specific preprocessing.
+
+5.1 Fit the model
+```{r}
+# Prepare the predictor matrix and response vector
+X <- data[, c("AGE", "LONELINESS", "DEPRESSION", "ANXIETY", "GENDER", "RACE", "US_BORN", 
+              "EMPLOYED", "SCHOOL", "THERAPY", "ALCOHOL", "TOBACCO", "ECSTASY", "KETAMINE",
+              "METHAMPHETAMINE", "MARIJUANA", "COCAINE_POWEDER", "GHB", "COCAINE_CRACK", 
+              "HEROIN", "MUSHROOM", "LSD", "RX")]
+y <- data$TOTALDRUGS
+
+# Fit a Random Forest model
+rf_model <- randomForest(x = X, y = y)
+# Print the summary of the Random Forest model
+summary(rf_model)
+```
+
+5.2 Check the siginficance
+```{r}
+# Assess variable importance using the vip package
+variable_importance_rf <- vip(rf_model )
+# Print variable importance for random forest model
+print(variable_importance_rf)
+vi(rf_model )
+```
+
+From the random forest model, we found out that "ANXIETY" has the highest importance score (268.9034), indicating it is likely one of the most influential variables in the model.
+"COCAINE_POWDER" and "DEPRESSION" also have relatively high importance scores, suggesting they may be significant predictors.
+
+6. Gradient Boost Machines
+
+Gradient Boosting Machines (GBMs) are another powerful ensemble learning method that can effectively handle categorical predictors. They could leverage the strengths of decision trees while incorporating advanced optimization techniques to produce accurate and interpretable models.
+
+6.1 Fit the model
+```{r}
+# Prepare the predictor matrix and response vector
+X <- data[, c("AGE", "LONELINESS", "DEPRESSION", "ANXIETY", "GENDER", "RACE", "US_BORN", 
+              "EMPLOYED", "SCHOOL", "THERAPY", "ALCOHOL", "TOBACCO", "ECSTASY", "KETAMINE",
+              "METHAMPHETAMINE", "MARIJUANA", "COCAINE_POWEDER", "GHB", "COCAINE_CRACK", 
+              "HEROIN", "MUSHROOM", "LSD", "RX")]
+y <- data$TOTALDRUGS
+
+# Fit a GBM model
+gbm_model <- gbm(TOTALDRUGS ~ ., data = data, distribution = "gaussian")
+
+```
+
+From GBMs, we found out that "ANXIETY" has the highest importance score (34.4856), indicating it is likely one of the most influential variables in the model.
+"COCAINE_POWDER" and "DEPRESSION" also have relatively high importance scores, suggesting they may be significant predictors.
+
+6.2 Check the significance
+```{r}
+# Assess variable importance using the vip package
+variable_importance_gbm <- vip(gbm_model )
+# Print variable importance for GBM model
+print(variable_importance_gbm)
+vi(gbm_model )
+```
+
+From the Gradient Boosting Machine (GBM) model, we observed that "ANXIETY" stands out with the highest importance score of 34.5. This indicates that "ANXIETY" is likely one of the most influential variables in the model. Following "ANXIETY," "COCAINE_POWDER" and "DEPRESSION" also exhibit relatively high importance scores of 15.1 and 12.9, respectively. These scores suggest that "COCAINE_POWDER" and "DEPRESSION" may also be significant predictors in the model.
+
+7. Results
+```{r}
+
+# Function to extract the top n variables from a feature importance list or data frame
+top_n_variables <- function(importance, n = 3) {
+
+  if (is.data.frame(importance)) {
+    return(importance[order(importance$Importance, decreasing = TRUE), ][1:n, ])
+  }
+
+  else if (is.list(importance)) {
+    df <- data.frame(Variable = names(importance), Importance = unlist(importance))
+    return(df[order(df$Importance, decreasing = TRUE), ][1:n, ])
+  }
+  else {
+    stop("Invalid format for feature importance")
+  }
+}
+
+# Extract the top three variables for each method
+top_variables_ridge <- top_n_variables(vi(ridge_model))
+top_variables_tree <- top_n_variables(vi(tree_model))
+top_variables_rf <- top_n_variables(vi(rf_model))
+top_variables_gbm <- top_n_variables(vi(gbm_model))
+
+# Combine the results into a single data frame
+combined_top_variables <- data.frame(
+  Ridge_Regression = top_variables_ridge$Variable,
+  Decision_Tree = top_variables_tree$Variable,
+  Random_Forest = top_variables_rf$Variable,
+  Gradient_Boosting = top_variables_gbm$Variable
+)
+
+print(combined_top_variables)
+
+```
+
+```{r}
+
+# Calculate the frequency of each variable across all columns
+variable_frequency <- table(unlist(combined_top_variables))
+
+# Create a data frame to store the variable frequencies
+variable_frequency_df <- data.frame(
+  Variable = names(variable_frequency),
+  Frequency = as.numeric(variable_frequency)
+)
+
+# Sort the data frame by frequency in descending order
+variable_frequency_df <- variable_frequency_df[order(variable_frequency_df$Frequency, decreasing = TRUE), ]
+
+print(variable_frequency_df)
+# Load required library
+library(ggplot2)
+
+# Sort the dataframe by Frequency column in decreasing order
+variable_frequency_df <- variable_frequency_df[order(variable_frequency_df$Frequency, decreasing = TRUE), ]
+
+# Create a color palette based on frequency
+color_palette <- colorRampPalette(c("lightblue", "blue"))(nrow(variable_frequency_df))
+
+# Create a bar plot with variable-specific colors
+ggplot(variable_frequency_df, aes(x = Variable, y = Frequency, fill = Frequency)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradientn(colors = color_palette) +
+  labs(x = "Variable", y = "Frequency", title = "Frequency of Variables") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+Ridge Regression offers interpretable coefficients and handles multicollinearity well, but may not capture complex nonlinear relationships. Decision trees are intuitive and easy to interpret, but prone to overfitting. Random forests reduce overfitting and provide estimates of feature importance but lack interpretability compared to single decision trees. Gradient Boosting, while improving prediction accuracy, may be computationally expensive and sensitive to overfitting.
+
+As shown in the combined table, "ANXIETY", "DEPRESSION" are two most important variables on "TOTALDRUGS".
